@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Threading;
 
 using NLog;
@@ -24,7 +25,7 @@ namespace Sshunt
 			_logger = LogManager.GetCurrentClassLogger();
 		}
 
-		public void Connect()
+		public void Connect(CancellationToken cancellationToken)
 		{
 			if (_signal != null)
 			{
@@ -36,31 +37,18 @@ namespace Sshunt
 				var allowReconnect = true;
 				using (_signal = new ManualResetEventSlim(false))
 				{
-					Console.CancelKeyPress += (s, e) =>
-					                          {
-						                          e.Cancel = true;
-						                          if (_signal != null)
-						                          {
-							                          _signal.Set();
-						                          }
-					                          };
+					cancellationToken.Register(() =>
+					                           {
+						                           if (_signal != null)
+						                           {
+							                           _signal.Set();
+						                           }
+					                           });
 
 					_sshClient.ErrorOccurred += (s, e) =>
 					                            {
 						                            _logger.Error("Remote error: {0}", e.Exception);
 						                            _logger.Info("Reconnecting...");
-
-						                            // There was a version of SSH.NET that unreliably and inaccurately reported itself as connected
-						                            if (_sshClient.IsConnected)
-						                            {
-							                            // So, if connected, force a disconnect...
-							                            try
-							                            {
-								                            _sshClient.Disconnect();
-							                            }
-								                            // ReSharper disable once EmptyGeneralCatchClause
-							                            catch {} // and ignore any exceptions
-						                            }
 
 						                            allowReconnect = true;
 						                            if (_signal != null)
@@ -102,11 +90,10 @@ namespace Sshunt
 		{
 			sshClient.Connect();
 
-
-			foreach (var forwardedPortPromise in _options.GetForwardedPorts())
+			var forwardedPorts = _options.GetForwardedPorts().Select(f => f.Build()).ToList();
+			foreach (var forwardedPort in forwardedPorts)
 			{
-				_logger.Debug("ForwardedPort: {0}", forwardedPortPromise);
-				var forwardedPort = forwardedPortPromise.Build();
+				_logger.Debug("ForwardedPort: {0}", forwardedPorts);
 				sshClient.AddForwardedPort(forwardedPort);
 				forwardedPort.Exception += (s, e) => _logger.Warn("Exception on forwarded port {0}", e.Exception);
 				forwardedPort.RequestReceived += (s, e) => _logger.Trace("Request from '{0}' on port '{1}'.", e.OriginatorHost, e.OriginatorPort);
@@ -122,6 +109,23 @@ namespace Sshunt
 				                            };
 
 				signal.Wait();
+			}
+
+			foreach (var forwardedPort in forwardedPorts)
+			{
+				forwardedPort.Stop();
+			}
+
+			// There was a version of SSH.NET that unreliably and inaccurately reported itself as connected
+			if (_sshClient.IsConnected)
+			{
+				// So, if connected, force a disconnect...
+				try
+				{
+					_sshClient.Disconnect();
+				}
+				// ReSharper disable once EmptyGeneralCatchClause
+				catch { } // and ignore any exceptions
 			}
 		}
 	}

@@ -1,7 +1,10 @@
 ﻿using System;
 using System.Diagnostics;
+using System.Threading;
 
 using NLog;
+
+using Sshunt.WindowsService;
 
 namespace Sshunt
 {
@@ -15,30 +18,55 @@ namespace Sshunt
 
 		public static void Main(string[] args)
 		{
+			LogConfiguration.SetUp(LogLevel.Warn);
+
+			var options = new Options();
+
+			string helpText;
+			if (!options.TryParse(args, out helpText))
+			{
+				if (Environment.UserInteractive)
+				{
+					Console.Out.WriteLine(helpText);
+				}
+				Environment.ExitCode = INVALID_ARGS_ERROR_CODE;
+				return;
+			}
+			new Program().Run(options, new CancellationTokenSource());
+		}
+
+		public void Run(Options options, CancellationTokenSource cancellationTokenSource)
+		{
 			try
 			{
-				var options = new Options();
+				LogConfiguration.SetUp(options.LogLevel);
 
-				string helpText;
-				if (!options.TryParse(args, out helpText))
+				if (options.AreForWindowsService)
 				{
-					if (Environment.UserInteractive)
-					{
-						Console.Out.WriteLine(helpText);
-					}
-					Environment.ExitCode = INVALID_ARGS_ERROR_CODE;
+					WindowsServiceController.Execute(options);
 					return;
 				}
 
-				LogConfiguration.SetUp(options.LogLevel);
-
 				var identityFileLocator = new IdentityFileLocator();
+
+				if (Environment.UserInteractive)
+				{
+					Console.CancelKeyPress += (s, e) =>
+					                          {
+						                          e.Cancel = true;
+						                          if (!cancellationTokenSource.IsCancellationRequested)
+						                          {
+							                          cancellationTokenSource.Cancel();
+						                          }
+					                          };
+				}
 
 				var sshClientFactory = new SshClientFactory(identityFileLocator);
 				using (var sshClient = sshClientFactory.CreateSshClient(options))
 				{
+					sshClient.KeepAliveInterval = TimeSpan.FromSeconds(60);
 					var service = new SshService(sshClient, options);
-					service.Connect();
+					service.Connect(cancellationTokenSource.Token);
 				}
 			}
 			catch (UnableToLocateIdentityFileException e)

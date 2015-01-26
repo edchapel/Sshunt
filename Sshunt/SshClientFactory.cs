@@ -21,13 +21,13 @@ namespace Sshunt
 			if (!string.IsNullOrWhiteSpace(password))
 			{
 				_logger.Warn("Using password to connect, against better advice...");
-				return new SshClient(options.Host, options.Port, options.UserName, password);
+				return new SshClient(options.HostName, options.Port, options.UserName, password);
 			}
 
 			var identityFile = _identityFileLocator.FindIdentityFile(options.IdentityFile, options.GetKeyPassphrase());
 			if (identityFile != null)
 			{
-				return new SshClient(options.Host, options.Port, options.UserName, identityFile);
+				return new SshClient(options.HostName, options.Port, options.UserName, identityFile);
 			}
 
 			throw new UnableToLocateIdentityFileException(options.IdentityFile ?? "<no identitify file specified>");

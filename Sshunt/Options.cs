@@ -6,6 +6,8 @@ using System.Text.RegularExpressions;
 using CommandLine;
 using CommandLine.Text;
 
+using Newtonsoft.Json;
+
 using NLog;
 
 namespace Sshunt
@@ -47,12 +49,16 @@ namespace Sshunt
 		[Option("password",
 			MutuallyExclusiveSet = "credential",
 			MetaValue = "PASSWORD",
-			HelpText = "Not recommended for security reasons. Use an identity file instead. Cannot be used with -i option.")]
+			HelpText = "Not recommended for security reasons. Use an identity file instead. Cannot be used with -i option. " +
+			           "Cannot be used when Sshunt is running as a Windows service.")]
+		[JsonIgnore]
 		public string Password { get; set; }
 
 		[Option("key-passphrase",
 			MetaValue = "PASSPHRASE",
-			HelpText = "Passphrase to the identity_file. Better to use an identity_file without a passphrase for headless operation.")]
+			HelpText = "Passphrase to the identity_file. Better to use an identity_file without a passphrase for headless operation. " +
+			           "Cannot be used when Sshunt is running as a Windows service.")]
+		[JsonIgnore]
 		public string KeyPassphrase { get; set; }
 
 		[Option('v', "verbose",
@@ -64,7 +70,36 @@ namespace Sshunt
 		[Option('q', "quiet",
 			MutuallyExclusiveSet = "noise",
 			HelpText = "Quiet mode. Causes most warning and diagnostic messages to be suppressed. Header is not shown.")]
+		[JsonIgnore]
 		public bool Quiet { get; set; }
+
+		[Option("install-svc",
+//			MetaValue = "SERVICENAME",
+			MutuallyExclusiveSet = "service",
+			HelpText = "Installs Sshunt as a Windows service, with the name specified, for even more persistency. All required configuration items must be provided in this call.")]
+		[JsonIgnore]
+		public bool InstallService { get; set; }
+
+		[Option("uninstall-svc",
+//			MetaValue = "SERVICENAME",
+			MutuallyExclusiveSet = "service",
+			HelpText = "Uninstalls any Sshunt Windows services found with this name.")]
+		[JsonIgnore]
+		public bool UninstallService { get; set; }
+
+		[Option("start-svc",
+//			MetaValue = "SERVICENAME",
+			MutuallyExclusiveSet = "service",
+			HelpText = "Starts the named Sshunt Windows service.")]
+		[JsonIgnore]
+		public bool StartService { get; set; }
+
+		[Option("stop-svc",
+//			MetaValue = "SERVICENAME",
+			MutuallyExclusiveSet = "service",
+			HelpText = "Stops the named Sshunt Windows service.")]
+		[JsonIgnore]
+		public bool StopService { get; set; }
 
 		[ValueOption(0)]
 		public string Host
@@ -74,11 +109,13 @@ namespace Sshunt
 			{
 				if (!string.IsNullOrWhiteSpace(value))
 				{
+					_host = value;
+
 					// Support 'user@host' or 'host'
 					var match = Regex.Match(value, @"^(?:(?<user>[^@]+)@)?(?<host>.+)$", RegexOptions.ExplicitCapture);
 					if (match.Success)
 					{
-						_host = match.Groups["host"].Value;
+						HostName = match.Groups["host"].Value;
 
 						// User is optional
 						var user = match.Groups["user"];
@@ -87,25 +124,32 @@ namespace Sshunt
 					}
 				}
 
-				_host = null;
+				HostName = null;
 				UserName = null;
 			}
 		}
 
 		[ValueList(typeof (List<string>))]
+		[JsonIgnore]
 		public IList<string> OverFlow { get; set; }
 
 		/// <summary>
 		/// Null unless the CommondLine Parser finds an error. There can still be errors with this null.
 		/// </summary>
 		[ParserState]
+		[JsonIgnore]
 		public IParserState LastParserState { get; set; }
 
+		[JsonIgnore]
 		public bool AreExtendedOptionsValid
 		{
 			get { return !GetExtendedErrors(BaseSentenceBuilder.CreateBuiltIn()).Any(); }
 		}
 
+		[JsonIgnore]
+		public string HostName { get; private set; }
+
+		[JsonIgnore]
 		public string UserName { get; private set; }
 
 		public LogLevel LogLevel { get; private set; }
@@ -120,6 +164,7 @@ namespace Sshunt
 			           "By default, the listening socket on the server will be bound to the loopback interface only. This may be overridden by " +
 			           "specifying a bind_address. An empty bind_address, or the address ‘*’, indicates that the remote socket should listen on all " +
 			           "interfaces. Specifying a remote bind_address will only succeed if the server's GatewayPorts option is enabled (see sshd_config(5)).")]
+		[JsonProperty]
 		public IList<string> RemoteForwards { get; set; }
 
 		[OptionList('L',
@@ -132,7 +177,21 @@ namespace Sshunt
 			           " local port is bound in accordance with the GatewayPorts setting. However, an explicit bind_address may be used to bind the" +
 			           " connection to a specific address. The bind_address of \"localhost\" indicates that the listening port be bound for local use" +
 			           " only, while an empty address or ‘*’ indicates that the port should be available from all interfaces.")]
+		[JsonProperty]
 		public IList<string> LocalForwards { get; set; }
+
+		[JsonIgnore]
+		public bool AreForWindowsService
+		{
+			get
+			{
+				return StartService || StopService || InstallService || UninstallService;
+//				return !string.IsNullOrWhiteSpace(Start) ||
+//				       !string.IsNullOrWhiteSpace(Stop) ||
+//				       !string.IsNullOrWhiteSpace(Install) ||
+//				       !string.IsNullOrWhiteSpace(Uninstall);
+			}
+		}
 
 		public bool TryParse(string[] args, out string helpText)
 		{
@@ -157,12 +216,14 @@ namespace Sshunt
 			// Silly API allows only 5 lines at a time and a maximum width
 			// This uses more width/lines than supported... so do them one at a time then.
 			helpText.AddPreOptionsLine(@" "); // New line looks nicer after the copyright. Space is to avoid an exception in SSH.NET.
-			helpText.AddPreOptionsLine("Usage: sshunt host");
-			helpText.AddPreOptionsLine("       sshunt [-i identity_file | --password PASSWORD]");
+			helpText.AddPreOptionsLine("Usage: sshunt [options] [user@]host");
+			helpText.AddPreOptionsLine("       sshunt <install-svc|uninstall-svc|start-svc|stop-svc> SERVICENAME");
+			helpText.AddPreOptionsLine("              [options] [user@]host");
+			helpText.AddPreOptionsLine("Options:      [-i identity_file | --password PASSWORD]");
 			helpText.AddPreOptionsLine("              [--key-passphrase PASSPHRASE]");
 			helpText.AddPreOptionsLine("              [-L [bind_address:]port:host:hostport]");
 			helpText.AddPreOptionsLine("              [-R [bind_address:]port:host:hostport]");
-			helpText.AddPreOptionsLine("              [-v|--verbose|-q|--quiet] [-p PORT] [user@]hostname");
+			helpText.AddPreOptionsLine("              [-v|--verbose|-q|--quiet] [-p PORT]");
 
 			var hasErrorHeader = false;
 			if (LastParserState != null && LastParserState.Errors.Any())
@@ -269,10 +330,34 @@ namespace Sshunt
 
 		private IEnumerable<string> GetExtendedErrors(BaseSentenceBuilder sentenceBuilder)
 		{
-			if (string.IsNullOrWhiteSpace(Host))
+			if (string.IsNullOrWhiteSpace(HostName))
 			{
 				// Two leading spaces is standard for CommandLine
 				yield return string.Format("  hostname {0}", sentenceBuilder.RequiredOptionMissingText);
+			}
+
+			if (string.IsNullOrWhiteSpace(UserName))
+			{
+				// Two leading spaces is standard for CommandLine
+				yield return string.Format("  hostname {0}", sentenceBuilder.RequiredOptionMissingText);
+			}
+
+			if (AreForWindowsService)
+			{
+				if (!string.IsNullOrWhiteSpace(Password))
+				{
+					yield return "  password cannot be used with Windows service related arguments";
+				}
+
+				if (!string.IsNullOrWhiteSpace(KeyPassphrase))
+				{
+					yield return "  key-passphrase cannot be used with Windows service related arguments";
+				}
+
+				if (new[] {StartService, StopService, InstallService, UninstallService}.Where(x => x).Count() > 1)
+				{
+					yield return "  only one Windows service may be called at once";
+				}
 			}
 
 			foreach (var overFlow in OverFlow)
